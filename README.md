@@ -40,8 +40,6 @@ A `.pkl` (Pickle) file is a binary file format used in Python to serialize and s
 2. **Reproducibility** – Ensures consistency when analyzing past predictions.
 3. **Memory Efficiency** – Saves computational resources by storing results instead of recalculating them.
 
-In short, `.pkl` files are like a **cheat code** for efficient stock market predictions—quick, reliable, and incredibly useful! 💰📈
-
 ### 6. Evaluating Prediction Accuracy
 - Compares predicted low-price days with actual market data.
 - Computes accuracy by checking how often the predicted lowest price day matches the actual lowest price day.
