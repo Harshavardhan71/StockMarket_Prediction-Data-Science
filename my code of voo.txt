@@ -1,0 +1,130 @@
+# Install required libraries
+!pip install pandas
+!pip install prophet
+
+# Import necessary libraries
+import pandas as pd
+from prophet import Prophet
+from IPython.display import clear_output
+import os
+import logging
+
+# Set logging level to WARNING to remove 'INFO' warnings from Prophet
+logging.getLogger('prophet').setLevel(logging.WARNING)
+
+# Read the data
+data_import = pd.read_csv("VOO.csv", parse_dates=["Date"])
+data_import
+
+# Add a column of the day names
+day_mapper = {0: "Monday", 1:"Tuesday", 2:"Wednesday", 3:"Thursday", 4:"Friday", 5:"Saturday", 6:"Sunday"}
+data_import["DayOfWeek"] = data_import["Date"].map(lambda x: day_mapper[x.dayofweek])
+data_import
+
+# Calculate the difference from the previous day
+data_import["diff_from_previous_day"] = (data_import["Open"].diff() / data_import["Open"]) * 100
+data_import
+
+# Compare the different days to see which one has the biggest dip from the previous day
+data_import.groupby("DayOfWeek")["diff_from_previous_day"].mean()
+
+# Create a table of every day between the minimum date and maximum date to deal with holidays
+dates = pd.date_range(start=data_import["Date"].min(), end=data_import["Date"].max())
+
+# Add the name of the day of the week
+date_table = pd.DataFrame(data={"Calendar Date": dates})
+date_table["Weekday"] = date_table["Calendar Date"].map(lambda x: day_mapper[x.dayofweek])
+date_table
+
+# Create a table of all dates and remove the weekends
+full_calendar = pd.merge(left=date_table, right=data_import, how='left', left_on='Calendar Date', right_on='Date')
+full_calendar = full_calendar[~full_calendar["Weekday"].isin(["Saturday", "Sunday"])]
+full_calendar.rename(columns={"Date": "Trading day"}, inplace=True)
+full_calendar
+
+# In order to account for holidays, take the next day's opening value as that's the price I'd buy the stock at
+full_calendar = full_calendar.bfill(axis='rows').reset_index(drop=True)
+full_calendar
+
+# There's a different number of each Weekday across 12 years
+full_calendar["Weekday"].value_counts()
+
+# Define a function to backtest as if we invested from the beginning
+def day_backtester(day, amount_to_invest, data):
+    temp_data = data[data["Weekday"] == day]
+    temp_data["Shares Owned"] = amount_to_invest / temp_data["Open"]
+    final_price = temp_data["Open"].iloc[-1]
+    final_amount = temp_data["Shares Owned"].sum() * final_price
+    formatted_final_amount = "${:,.2f}".format(final_amount)
+    return formatted_final_amount
+
+# Print the backtest results for each weekday
+for i in full_calendar["Weekday"].unique():
+    print(i, day_backtester(i, 750, full_calendar))
+
+# Define a function to predict using Prophet
+def prophet_predictor(dataset):
+    # Needs to take 3 weeks of data (Monday - Friday) and predict the 4th week
+    m = Prophet()
+    m.fit(dataset)
+    future = m.make_future_dataframe(periods=7)
+    forecast = m.predict(future)
+    return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail()
+
+# Create an empty list to store forecast data
+forecast_data = []
+
+# Start the forecasting process
+for i in full_calendar[full_calendar["Weekday"] == "Monday"]["Calendar Date"].iloc[402:].index:
+    days_to_include = i - 15
+    temp = full_calendar.iloc[days_to_include:i, [0, 3]]
+    temp.rename(columns={"Calendar Date": "ds", "Open": "y"}, inplace=True)
+    prophet_predictor(temp).to_pickle(f"three_week_forecast/{i}.pkl")
+    clear_output(wait=True)
+    print(i, "/", full_calendar[full_calendar["Weekday"] == "Monday"]["Calendar Date"].iloc[17:].index.max())
+
+# Import and append all of the Pickle files
+files_to_append = []
+files_to_read = ["three_week_forecast/" + i for i in os.listdir("three_week_forecast")]
+for i in files_to_read:
+    files_to_append.append(pd.read_pickle(i))
+
+# Combine all of the saved Pickle files
+predicted_values = pd.concat(files_to_append).sort_values("ds")
+predicted_values.rename(columns={"ds": "Predicted_Date", "yhat": "Prediction"}, inplace=True)
+predicted_values
+
+# The lowest value day per week: Predicted Part 1
+full_calendar["Week Monday"] = full_calendar["Calendar Date"] - pd.to_timedelta(full_calendar["Calendar Date"].dt.dayofweek, unit='d')
+predicted_values["Week Monday"] = predicted_values["Predicted_Date"] - pd.to_timedelta(predicted_values["Predicted_Date"].dt.dayofweek, unit='d')
+min_predicted_values = predicted_values.groupby("Week Monday")["Prediction"].min().reset_index()
+min_predicted_values
+
+# The lowest value day per week: Predicted Part 2
+predicted_values_output = pd.merge(min_predicted_values, predicted_values, how="left", on=["Week Monday", "Prediction"])
+predicted_values_output = predicted_values_output.groupby("Week Monday")["Predicted_Date"].min().reset_index()
+predicted_values_output["Predicted_Min_Day"] = predicted_values_output["Predicted_Date"].map(lambda x: day_mapper[x.dayofweek])
+predicted_values_output
+
+# The lowest value day per week: Actual
+min_values_per_week = full_calendar.groupby("Week Monday")["Open"].min().reset_index()
+actual_values_min_per_week = pd.merge(min_values_per_week, full_calendar, how="left", on=["Week Monday", "Open"])
+actual_values_min_per_week = actual_values_min_per_week.groupby("Week Monday")["DayOfWeek"].min().reset_index()
+actual_values_min_per_week.rename(columns={"DayOfWeek": "Actual Min Day"}, inplace=True)
+actual_values_min_per_week
+
+# Number of values per min day: Actual
+actual_values_min_per_week["Actual Min Day"].value_counts()
+
+# Number of values per min day: Predicted
+predicted_values_output["Predicted_Min_Day"].value_counts()
+
+# Combine the actual and predicted min days per week
+combined_prophet_predictions = pd.merge(actual_values_min_per_week, predicted_values_output, how="left", on="Week Monday")
+combined_prophet_predictions = combined_prophet_predictions.dropna()
+combined_prophet_predictions["Correct Predictions"] = combined_prophet_predictions.apply(lambda x: 1 if x["Actual Min Day"] == x["Predicted_Min_Day"] else 0, axis='columns')
+combined_prophet_predictions
+
+# Calculate the percent of accurate calculations
+accuracy = combined_prophet_predictions["Correct Predictions"].sum() / len(combined_prophet_predictions)
+print(f"Accuracy: {accuracy:.2%}")
